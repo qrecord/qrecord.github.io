@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Motion Sensor and Noise Detector with Logs and Recordings</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width:100vw; 
+            color: #333;
+        }
+
+        #content {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            background: #fff;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+        }
+
+        #video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        #video, #canvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+
+        #status {
+            margin-top: 10px;
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #007BFF;
+        }
+
+        .log-container {
+            width: 300px;
+            height: 480px;
+            border: 1px solid #ccc;
+            background-color: #fff;
+            display: flex;
+            flex-direction: column;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .log-header {
+            background-color: #007BFF;
+            padding: 10px;
+            font-weight: bold;
+            color: #fff;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+        }
+
+        .log-content {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .event {
+            margin-bottom: 10px;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+        }
+
+        .event-type {
+            font-weight: bold;
+            color: #007BFF;
+        }
+
+        .event-time {
+            font-style: italic;
+            color: #666;
+        }
+
+        .event-duration {
+            color: #333;
+        }
+
+        .download-link {
+            color: #007BFF;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .download-link:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 1100px) {
+            body {
+                padding: 10px;
+                height: auto;
+            }
+
+            #content {
+                flex-direction: column;
+                align-items: center;
+                gap: 20px;
+            }
+
+            #video-container {
+                width: 100%;
+                max-width: 640px;
+                height: auto;
+                aspect-ratio: 4 / 3;
+            }
+
+            .log-container {
+                width: 100%;
+                max-width: 640px;
+                height: 200px;
+            }
+        }
+
+        @media (min-width: 768px) and (max-width: 1100px) {
+            #content {
+                flex-direction: row;
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            .log-container {
+                width: calc(50% - 10px);
+                height: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="content">
+        <div>
+            <div id="video-container">
+                <video id="video" autoplay></video>
+                <canvas id="canvas"></canvas>
+            </div>
+            <p id="status">Waiting for camera and microphone access...</p>
+        </div>
+        <div id="event-log" class="log-container">
+            <div class="log-header">Event Log</div>
+            <div class="log-content"></div>
+        </div>
+        <div id="long-events-log" class="log-container">
+            <div class="log-header">Long Events (&gt;2s)</div>
+            <div class="log-content"></div>
+        </div>
+    </div>
+
+    <script>
+        const minEventDuration = 0.2;
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const status = document.getElementById('status');
+        const eventLog = document.querySelector('#event-log .log-content');
+        const longEventsLog = document.querySelector('#long-events-log .log-content');
+        let previousFrame;
+        let threshold = 3;
+        const mediaQueryCondition = window.matchMedia('(max-width: 1100px)');
+        if (mediaQueryCondition.matches) {
+            threshold = 8;
+        }
+
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let analyser;
+        const noiseThreshold = 110;
+
+        let mediaRecorder;
+        let recordedChunks = [];
+        let audioStream;
+
+        function beep() {
+            const oscillator = audioContext.createOscillator();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+            oscillator.connect(audioContext.destination);
+            oscillator.start();
+            oscillator.stop(audioContext.currentTime + 0.2);
+        }
+
+        function startVideoAndAudio() {
+            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then(stream => {
+                    video.srcObject = stream;
+                    video.play();
+                    canvas.width = video.width = 640;
+                    canvas.height = video.height = 480;
+                    status.textContent = 'Motion and noise detection active';
+
+                    // Set up audio analysis
+                    const audioSource = audioContext.createMediaStreamSource(stream);
+                    const gainNode = audioContext.createGain();
+                    gainNode.gain.value = 5; // Increase volume by 5x
+                    analyser = audioContext.createAnalyser();
+                    audioSource.connect(gainNode);
+                    gainNode.connect(analyser);
+                    analyser.fftSize = 256;
+
+                    // Set up audio stream for recording
+                    const audioGainNode = audioContext.createGain();
+                    audioGainNode.gain.value = 5; // Increase volume by 5x
+                    audioSource.connect(audioGainNode);
+                    const destinationStream = audioContext.createMediaStreamDestination();
+                    audioGainNode.connect(destinationStream);
+                    audioStream = destinationStream.stream;
+
+                    // Set up MediaRecorder for video (motion detection)
+                    const videoTrack = stream.getVideoTracks()[0];
+                    const audioTrack = audioStream.getAudioTracks()[0];
+                    const combinedStream = new MediaStream([videoTrack, audioTrack]);
+                    mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                        }
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        if (recordedChunks.length > 0 && recordedChunks.some(chunk => chunk.size > 0)) {
+                            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                            if (blob.size > 0) {
+                                const url = URL.createObjectURL(blob);
+                                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                                const filename = `motion_detected_${timestamp}.webm`;
+                                
+                                const downloadLink = document.createElement('a');
+                                downloadLink.href = url;
+                                downloadLink.download = filename;
+                                downloadLink.textContent = `Download ${filename}`;
+                                downloadLink.className = 'download-link';
+                                
+                                const lastEvent = eventLog.firstChild;
+                                if (lastEvent) {
+                                    lastEvent.appendChild(document.createElement('br'));
+                                    lastEvent.appendChild(downloadLink);
+                                }
+                            }
+                        }
+                        recordedChunks = [];
+                    };
+
+                    detectMotionAndNoise();
+                })
+                .catch(err => {
+                    status.textContent = 'Error accessing camera or microphone: ' + err.message;
+                });
+        }
+
+        let detectionActive = false;
+        let detectionTimeout;
+        let detectionStartTime;
+        let currentEventType = null;
+        let audioRecorder;
+
+        function detectMotionAndNoise() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const currentFrame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            
+            // Motion detection
+            if (previousFrame) {
+                const diffAmount = pixelDiff(currentFrame.data, previousFrame.data);
+                if (diffAmount > threshold) {
+                    triggerDetection('Motion');
+                }
+            }
+            previousFrame = currentFrame;
+
+            // Noise detection
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(dataArray);
+            const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+            if (average > noiseThreshold) {
+                triggerDetection('Noise');
+            }
+
+            requestAnimationFrame(detectMotionAndNoise);
+        }
+
+        function triggerDetection(type) {
+            const now = new Date();
+            if (!detectionActive || currentEventType !== type) {
+                if (detectionActive) {
+                    endDetection();
+                }
+                detectionStartTime = now;
+                detectionActive = true;
+                currentEventType = type;
+                beep();
+                status.textContent = `${type} detected!`;
+                status.style.fontSize = '1.2em';
+                status.style.fontWeight = 'bold';
+
+                // Start recording based on detection type
+                if (type === 'Motion') {
+                    mediaRecorder.start();
+                } else if (type === 'Noise') {
+                    audioRecorder = new MediaRecorder(audioStream);
+                    audioRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                        }
+                    };
+                    audioRecorder.onstop = () => {
+                        if (recordedChunks.length > 0 && recordedChunks.some(chunk => chunk.size > 0)) {
+                            const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+                            if (blob.size > 0) {
+                                const url = URL.createObjectURL(blob);
+                                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                                const filename = `noise_detected_${timestamp}.webm`;
+                                
+                                const downloadLink = document.createElement('a');
+                                downloadLink.href = url;
+                                downloadLink.download = filename;
+                                downloadLink.textContent = `Download ${filename}`;
+                                downloadLink.className = 'download-link';
+                                
+                                const lastEvent = eventLog.firstChild;
+                                if (lastEvent) {
+                                    lastEvent.appendChild(document.createElement('br'));
+                                    lastEvent.appendChild(downloadLink);
+                                }
+                            }
+                        }
+                        recordedChunks = [];
+                    };
+                    audioRecorder.start();
+                }
+            }
+
+            clearTimeout(detectionTimeout);
+            detectionTimeout = setTimeout(() => {
+                endDetection();
+            }, 1000);
+        }
+
+        function endDetection() {
+            const now = new Date();
+            detectionActive = false;
+            status.textContent = 'No motion or noise detected';
+            status.style.fontSize = '1em';
+            status.style.fontWeight = 'normal';
+
+            const duration = (now - detectionStartTime) / 1000;
+            
+            if (duration >= minEventDuration) {
+                logEvent(currentEventType, detectionStartTime, duration);
+                
+                if (duration > 2) {
+                    logLongEvent(currentEventType, detectionStartTime, duration);
+                }
+            }
+
+            // Stop recording based on detection type
+            if (currentEventType === 'Motion') {
+                mediaRecorder.stop();
+            } else if (currentEventType === 'Noise') {
+                audioRecorder.stop();
+            }
+
+            currentEventType = null;
+        }
+
+        function logEvent(type, startTime, duration) {
+            const eventElement = document.createElement('div');
+            eventElement.className = 'event';
+            eventElement.innerHTML = `
+                <span class="event-type">${type}</span><br>
+                <span class="event-time">Time: ${startTime.toLocaleTimeString()}</span><br>
+                <span class="event-duration">Duration: ${duration.toFixed(1)}s</span>
+            `;
+            eventLog.insertBefore(eventElement, eventLog.firstChild);
+        }
+
+        function logLongEvent(type, startTime, duration) {
+            const eventElement = document.createElement('div');
+            eventElement.className = 'event';
+            eventElement.innerHTML = `
+                <span class="event-type">${type}</span><br>
+                <span class="event-time">Time: ${startTime.toLocaleTimeString()}</span><br>
+                <span class="event-duration">Duration: ${duration.toFixed(1)}s</span>
+            `;
+            longEventsLog.insertBefore(eventElement, longEventsLog.firstChild);
+        }
+
+        function pixelDiff(arr1, arr2) {
+            let diff = 0;
+            for (let i = 0; i < arr1.length; i += 4) {
+                diff += Math.pow(arr1[i] - arr2[i], 2);
+                diff += Math.pow(arr1[i + 1] - arr2[i + 1], 2);
+                diff += Math.pow(arr1[i + 2] - arr2[i + 2], 2);
+            }
+            return Math.sqrt(diff / (arr1.length / 4));
+        }
+
+        startVideoAndAudio();
+    </script>
+</body>
+</html>
