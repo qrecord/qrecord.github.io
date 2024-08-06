@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://qrecord.github.io/sitemap.xml
