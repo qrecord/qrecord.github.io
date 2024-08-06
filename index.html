@@ -164,7 +164,7 @@
                 <video id="video" autoplay></video>
                 <canvas id="canvas"></canvas>
             </div>
-            <p id="status">Turn on your camera!</p>
+            <p id="status">Waiting for camera and microphone...</p>
         </div>
         <div id="event-log" class="log-container">
             <div class="log-header">Event Log</div>
@@ -273,7 +273,7 @@
                     detectMotionAndNoise();
                 })
                 .catch(err => {
-                    status.textContent = 'Turn on your camera!';
+                    status.textContent = 'Turn on your camera and microphone!';
                 });
         }
 
